@@ -1,146 +1,130 @@
 package main
 
 import (
-  "net/http"
+  "encoding/json"
+  "fmt"
+  "github.com/go-redis/redis"
   "github.com/labstack/echo"
   "log"
-  "github.com/go-redis/redis"
-  "encoding/json"
+  "net/http"
   "time"
-  "fmt"
-  "math/rand"
 )
 
 const (
-  PreFilterChannelName string = "pre-filter"
-  RespondChannelName string = "respond"
-  Letters string = "0123456789ABCDEF"
+    PreFilterChannelName string = "pre-filter"
+    RespondChannelName   string = "respond"
 )
 
 var (
-  redisdb   *redis.Client
-  preFilter *redis.PubSub
-  respond   *redis.PubSub
+    redisdb   *redis.Client
+    respond   *redis.PubSub
 )
 
 type response struct {
-  PubSub  *redis.PubSub
-  RequestID   string
-  Status      int
-  Value       string
-  Context     echo.Context
+    Status    int
+    Value     string
 }
+
+// type request struct {
+//     request  *http.Request `json:"request"`
+//     path     string        `json:"path"`
+//     pnames   []string      `json:"param_names"`
+//     pvalues  []string      `json:"param_values"`
+// }
 
 func init() {
-  rand.Seed(time.Now().UnixNano())
-  redisdb = redis.NewClient(&redis.Options{
-    Addr:         ":6379",
-    DialTimeout:  10 * time.Second,
-    ReadTimeout:  30 * time.Second,
-    WriteTimeout: 30 * time.Second,
-    PoolSize:     10,
-    PoolTimeout:  30 * time.Second,
-  })
-
-  respond = redisdb.Subscribe(RespondChannelName)
-  // Wait for confirmation that subscription is created before publishing anything.
-  _, err = respond.Receive()
-  if err != nil {
-    panic(err)
-  }
-
-}
-
-func randomBytes(n int) ([]byte, error) {
-  bytes := make([]byte, n)
-  _, err := rand.Read(bytes)
-  if err != nil {
-    return bytes, err
-  }
-
-  return bytes, nil
-}
-
-func randomString(bytes []byte) string {
-  for i, b := range bytes {
-    bytes[i] = Letters[b%16]
-  }
-
-  return string(bytes)
-}
-
-func listen(r *response) error {
-  var (
-    err error
-    val string
-    msgi interface{}
-  )
-
-  for {
-    log.Printf("Beginning to loop")
-    msgi, err = r.PubSub.ReceiveTimeout(50000000 * time.Nanosecond)
+    redisdb = redis.NewClient(&redis.Options{
+        Addr:         "redis:6379",
+        DialTimeout:  10 * time.Second,
+        ReadTimeout:  30 * time.Second,
+        WriteTimeout: 30 * time.Second,
+        PoolSize:     10,
+        PoolTimeout:  30 * time.Second,
+    })
+    respond = redisdb.PSubscribe(fmt.Sprintf("%v:*", RespondChannelName))
+    // Wait for confirmation that subscription is created before publishing anything.
+    _, err := respond.Receive()
     if err != nil {
-      return err
+        panic(err)
     }
-    msg := msgi.(*redis.Message)
-    log.Printf("looking for: %v, Have: %v", r.RequestID, msg.Payload)
-    if r.RequestID == msg.Payload {
-      log.Printf("Found matching request: %v, %v", msg.Channel, msg.Payload)
-      // Read request object.
-      val, err = redisdb.Get(r.RequestID).Result()
-      log.Printf("val: %v, err: %v", val, err)
-      if err != nil {
-        r.Status = http.StatusInternalServerError
-        r.Value = fmt.Sprintf("error: %v", err)
-        return err
-      } else {
-        r.Status = http.StatusOK
-        r.Value = val
-      }
-      break
-    } else {
-      log.Printf("Request Not FOUND!!!: looking for: %v, Have: %v", r.RequestID, msg.Payload)
-      continue
+}
+
+func publish(id string, pubbed chan bool) {
+    log.Printf("Publishing: %v", fmt.Sprintf("%v:%v", PreFilterChannelName, id))
+    err := redisdb.Publish(fmt.Sprintf("%v:%v", PreFilterChannelName, id), id).Err()
+    if err != nil {
+        log.Printf("Got Error Publish: %v", err.Error())
+        pubbed <- false
     }
-  }
-  return r.Context.String(r.Status, r.Value)
+    pubbed <- true
+}
+
+func subscribe(id string, resp chan response) {
+    for {
+        msg, err := respond.Receive()
+        if err != nil {
+            resp <- response{http.StatusInternalServerError, "Failed to subscribe"}
+            break
+        }
+        switch msg := msg.(type) {
+        case *redis.Message:
+            if id == msg.Payload {
+                val, err := redisdb.Get(id).Result()
+                log.Printf("val: %v, err: %v", val, err)
+                if err != nil {
+                    resp <- response{http.StatusInternalServerError, "Failed read from redis"}
+                    break
+                }
+                resp <- response{http.StatusOK, val}
+                break
+            }
+            log.Printf("Not Found! id: %v, payload: %v", id, msg.Payload)
+            // resp <- response{http.StatusInternalServerError, "Not Found!"}
+        default:
+            log.Printf("Not a Message: %v", msg)
+        }
+    }
+    close(resp)
+}
+
+func queue_request(id string) response {
+    req_channel := make(chan bool)
+    resp_channel := make(chan response)
+    go subscribe(id, resp_channel)
+    go publish(id, req_channel)
+
+    req, resp := <-req_channel, <-resp_channel
+    if req == false {
+        return response{http.StatusInternalServerError, "Failed to publish"}
+    }
+    return resp
 }
 
 func EdgeController(c echo.Context) error {
-  var (
-    bytes     []byte
-    requestID string
-    err       error
-    cJson     []byte
-  )
+    var (
+        cJson     []byte
+        err       error
+    )
 
-  log.Printf("context: %v", c)
-  cJson, err = json.Marshal(c)
-  if err != nil {
-    return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err))
-  }
+    log.Printf("context: %v", c)
+    cJson, err = json.Marshal(c)
+    if err != nil {
+        log.Printf("Got Error Marshal: %v, %v", cJson, err.Error())
+        return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err.Error()))
+    }
 
-  bytes, err = randomBytes(32)
-  if err != nil {
-    return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err))
-  }
-  requestID = randomString(bytes)
-  // Store the request object on key requestID.
-  // no ttl
-  // err = redisdb.Set(requestID, string(cJson), 0).Err()
-  // ttl 300000000 * time.Nanosecond == 300 milliseconds
-  err = redisdb.Set(requestID, string(cJson), 300000000 * time.Nanosecond).Err()
-  if err != nil {
-    return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err))
-  }
+    requestID := c.Response().Header().Get(echo.HeaderXRequestID)
+    // Store the request object on key requestID.
+    // no ttl
+    // err = redisdb.Set(requestID, string(cJson), 0).Err()
+    // ttl 300000000 * time.Nanosecond == 300 milliseconds
+    log.Printf("Setting key on redis: %v, %v, ", requestID, string(cJson))
+    err = redisdb.Set(requestID, string(cJson), 300000000 * time.Nanosecond).Err()
+    if err != nil {
+        log.Printf("Got Error Set: %v", err.Error())
+        return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err.Error()))
+    }
 
-  // Publish a message.
-  log.Printf("Publish Error: %v, %v", PreFilterChannelName, requestID)
-  err = redisdb.Publish(PreFilterChannelName, requestID).Err()
-  if err != nil {
-    return c.String(http.StatusInternalServerError, fmt.Sprintf("error: %v", err))
-  }
-
-  r := &response{PubSub: respond, RequestID: requestID, Context: c}
-  return listen(r)
+    resp := queue_request(requestID)
+    return c.String(resp.Status, resp.Value)
 }

@@ -189,15 +189,15 @@ type (
 	}
 
 	context struct {
-		request  *http.Request  `json:"request"`
-		response *Response      `json:"response"`
-		path     string         `json:"path"`
-		pnames   []string       `json:"pnames"`
-		pvalues  []string       `json:"pnames"`
-		query    url.Values     `json:"pvalues"`
-		handler  HandlerFunc    `json:"handler"`
-		store    Map            `json:"store"`
-		echo     *Echo          `json:"echo"`
+		request  *http.Request
+		response *Response
+		path     string
+		pnames   []string
+		pvalues  []string
+		query    url.Values
+		handler  HandlerFunc
+		store    Map
+		echo     *Echo
 	}
 )
 
