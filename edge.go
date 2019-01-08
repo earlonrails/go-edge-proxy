@@ -1,18 +1,19 @@
 package main
 
 import (
-  "encoding/json"
-  "fmt"
-  "github.com/go-redis/redis"
-  "github.com/labstack/echo"
-  "log"
-  "net/http"
-  "time"
+    "encoding/json"
+    "fmt"
+    "github.com/go-redis/redis"
+    "github.com/labstack/echo"
+    "log"
+    "net/http"
+    "time"
 )
 
 const (
     PreFilterChannelName string = "pre-filter"
     RespondChannelName   string = "respond"
+    MaxMessages = 100
 )
 
 var (
@@ -20,17 +21,15 @@ var (
     respond   *redis.PubSub
 )
 
+type request struct {
+    ID    string
+
+}
+
 type response struct {
     Status    int
     Value     string
 }
-
-// type request struct {
-//     request  *http.Request `json:"request"`
-//     path     string        `json:"path"`
-//     pnames   []string      `json:"param_names"`
-//     pvalues  []string      `json:"param_values"`
-// }
 
 func init() {
     redisdb = redis.NewClient(&redis.Options{
@@ -53,20 +52,21 @@ func publish(id string, pubbed chan bool) {
     log.Printf("Publishing: %v", fmt.Sprintf("%v:%v", PreFilterChannelName, id))
     err := redisdb.Publish(fmt.Sprintf("%v:%v", PreFilterChannelName, id), id).Err()
     if err != nil {
-        log.Printf("Got Error Publish: %v", err.Error())
-        pubbed <- false
+      log.Printf("Got Error Publish: %v", err.Error())
+      pubbed <- false
     }
     pubbed <- true
 }
 
 func subscribe(id string, resp chan response) {
-    for {
-        msg, err := respond.Receive()
+    log.Println("My id looks good here:::", id)
+    for i := 0; i < MaxMessages; i++ {
+        msgi, err := respond.ReceiveTimeout(30000000 * time.Nanosecond)
         if err != nil {
-            resp <- response{http.StatusInternalServerError, "Failed to subscribe"}
-            break
+            log.Printf("err: %v", err)
+            // resp <- response{http.StatusInternalServerError, "Failed read from redis"}
         }
-        switch msg := msg.(type) {
+        switch msg := msgi.(type) {
         case *redis.Message:
             if id == msg.Payload {
                 val, err := redisdb.Get(id).Result()
@@ -78,13 +78,13 @@ func subscribe(id string, resp chan response) {
                 resp <- response{http.StatusOK, val}
                 break
             }
+            log.Println("My id does not look correct anymore:::", id)
             log.Printf("Not Found! id: %v, payload: %v", id, msg.Payload)
             // resp <- response{http.StatusInternalServerError, "Not Found!"}
         default:
             log.Printf("Not a Message: %v", msg)
         }
     }
-    close(resp)
 }
 
 func queue_request(id string) response {
@@ -97,6 +97,7 @@ func queue_request(id string) response {
     if req == false {
         return response{http.StatusInternalServerError, "Failed to publish"}
     }
+
     return resp
 }
 
