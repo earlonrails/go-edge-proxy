@@ -21,11 +21,6 @@ var (
     respond   *redis.PubSub
 )
 
-type request struct {
-    ID    string
-
-}
-
 type response struct {
     Status    int
     Value     string
@@ -73,9 +68,11 @@ func subscribe(id string, resp chan response) {
                 log.Printf("val: %v, err: %v", val, err)
                 if err != nil {
                     resp <- response{http.StatusInternalServerError, "Failed read from redis"}
+                    close(resp)
                     break
                 }
                 resp <- response{http.StatusOK, val}
+                close(resp)
                 break
             }
             log.Println("My id does not look correct anymore:::", id)
@@ -103,8 +100,8 @@ func queue_request(id string) response {
 
 func EdgeController(c echo.Context) error {
     var (
-        cJson     []byte
-        err       error
+        cJson   []byte
+        err     error
     )
 
     log.Printf("context: %v", c)
