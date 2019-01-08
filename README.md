@@ -4,6 +4,10 @@
 
 `docker-compose up`
 
+### W/O docker
+adjust the redis config in `edge.go` from `redis:6379` to `:6379` then:
+`make run`
+
 ### test using ab or hey
 `ab -n 2 http://localhost:9001/`
 `hey -n 50 http://localhost:9001/`
